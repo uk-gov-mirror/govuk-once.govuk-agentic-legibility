@@ -1,0 +1,63 @@
+{
+    "schema": "sfsm/0.2",
+    "id": "test.weather_alerts",
+    "version": "1.0",
+    "entry": "main",
+    "executor": {
+        "continue_as_new": {"min_steps_between": 50}
+    },
+    "processes": {
+        "main": {
+            "start": "ask_name",
+            "vars": {
+                "user_name": null,
+                "wants_alerts": false,
+                "final_status": "pending"
+            },
+            "states": {
+                "ask_name": {
+                    "type": "input",
+                    "prompt": "What is your name?",
+                    "schema": {"kind": "string", "max_length": 50},
+                    "assign": "user_name",
+                    "next": "ask_subscribe"
+                },
+                "ask_subscribe": {
+                    "type": "input",
+                    "prompt": "Do you want to receive weather alerts?",
+                    "schema": {"kind": "boolean"},
+                    "assign": "wants_alerts",
+                    "next": "check_subscription"
+                },
+                "check_subscription": {
+                    "type": "choice",
+                    "rules": [
+                        {
+                            "when": {"op": "is_true", "path": "wants_alerts"},
+                            "next": "set_subscribed"
+                        }
+                    ],
+                    "default": "set_declined"
+                },
+                "set_subscribed": {
+                    "type": "assign",
+                    "set": {"final_status": "subscribed"},
+                    "next": "end_success"
+                },
+                "set_declined": {
+                    "type": "assign",
+                    "set": {"final_status": "declined"},
+                    "next": "end_success"
+                },
+                "end_success": {
+                    "type": "end",
+                    "status": "success",
+                    "return": {
+                        "name": {"$": "user_name"},
+                        "status": {"$": "final_status"}
+                    }
+                }
+            }
+        }
+    }
+}
