@@ -1,0 +1,524 @@
+{
+  "schema": "sfsm/0.2",
+  "id": "dvla.change_of_address",
+  "version": "0.2.0",
+  "entry": "main",
+
+  "executor": {
+    "workflow_id_template": "coa-{{input.licence_no}}",
+    "id_reuse_policy": "reject_duplicate",
+    "run_timeout": "P14D",
+    "continue_as_new": { "mode": "suggested", "min_steps_between": 50 },
+    "search_attributes": {
+      "WorkflowKind": "dvla.change_of_address",
+      "CurrentState": { "$": "runtime.state_path" },
+      "Outcome": { "$": "runtime.outcome" }
+    }
+  },
+
+  "defaults": {
+    "call": {
+      "timeouts": { "start_to_close": "PT30S", "schedule_to_close": "PT5M" },
+      "retry": {
+        "max_attempts": 3,
+        "initial_interval": "PT2S",
+        "backoff_coefficient": 2.0,
+        "max_interval": "PT30S",
+        "retry_on": ["5xx", "429", "timeout", "connection"]
+      }
+    },
+    "notify": {
+      "timeouts": { "start_to_close": "PT30S", "schedule_to_close": "PT1H" },
+      "retry": {
+        "max_attempts": 5,
+        "initial_interval": "PT10S",
+        "backoff_coefficient": 2.0,
+        "max_interval": "PT10M",
+        "retry_on": ["5xx", "429", "timeout", "connection"]
+      }
+    }
+  },
+
+  "processes": {
+
+    "main": {
+      "start": "confirm_intent",
+      "vars": { "address": null, "photo_id": null },
+      "states": {
+        "confirm_intent": {
+          "type": "input",
+          "prompt": "Do you want to change the address on your driving licence?",
+          "schema": { "kind": "boolean" },
+          "assign": "confirmed",
+          "next": "branch_intent"
+        },
+        "branch_intent": {
+          "type": "choice",
+          "rules": [
+            { "when": { "op": "is_true", "path": "confirmed" }, "next": "choose_entry_method" }
+          ],
+          "default": "say_cancelled"
+        },
+        "say_cancelled": {
+          "type": "output",
+          "channel": "transcript",
+          "message": "No changes have been made to your licence.",
+          "next": "end_cancelled"
+        },
+        "end_cancelled": { "type": "end", "status": "cancelled", "outcome": "user_declined" },
+
+        "choose_entry_method": {
+          "type": "input",
+          "prompt": "How would you like to enter your new address?",
+          "schema": {
+            "kind": "enum",
+            "values": ["postcode", "manual"],
+            "labels": { "postcode": "Search by postcode", "manual": "Enter manually" }
+          },
+          "assign": "entry_method",
+          "next": "branch_entry_method"
+        },
+        "branch_entry_method": {
+          "type": "choice",
+          "rules": [
+            { "when": { "op": "eq", "path": "entry_method", "value": "postcode" },
+              "next": "run_postcode_search" }
+          ],
+          "default": "run_manual_entry"
+        },
+
+        "run_postcode_search": {
+          "type": "invoke",
+          "process": "postcode_search",
+          "assign": "address",
+          "catch": [ { "on": "abandoned", "next": "end_abandoned" } ],
+          "next": "run_photo_update"
+        },
+        "run_manual_entry": {
+          "type": "invoke",
+          "process": "manual_entry",
+          "assign": "address",
+          "next": "run_photo_update"
+        },
+        "run_photo_update": {
+          "type": "invoke",
+          "process": "photo_update",
+          "assign": "photo_id",
+          "catch": [ { "on": "abandoned", "next": "end_abandoned" } ],
+          "next": "run_address_update"
+        },
+        "run_address_update": {
+          "type": "invoke",
+          "process": "address_update",
+          "input": { "address": { "$": "address" }, "photo_id": { "$": "photo_id" } },
+          "catch": [ { "on": "rejected", "next": "end_rejected" } ],
+          "next": "run_finalisation"
+        },
+        "run_finalisation": {
+          "type": "invoke",
+          "process": "finalisation",
+          "input": { "address": { "$": "address" } },
+          "catch": [ { "on": "delivery_exception", "next": "end_exception" } ],
+          "next": "end_complete"
+        },
+
+        "end_complete":  { "type": "end", "status": "success",         "outcome": "licence_received" },
+        "end_rejected":  { "type": "end", "status": "failed",          "outcome": "update_rejected" },
+        "end_abandoned": { "type": "end", "status": "abandoned",       "outcome": "user_input_exhausted" },
+        "end_exception": { "type": "end", "status": "needs_attention", "outcome": "delivery_exception" }
+      }
+    },
+
+    "postcode_search": {
+      "start": "init",
+      "vars": { "attempts": 0, "max_attempts": 3 },
+      "states": {
+        "init": { "type": "assign", "set": { "attempts": 0 }, "next": "prompt_postcode" },
+
+        "prompt_postcode": {
+          "type": "input",
+          "prompt": "Please enter your new postcode.",
+          "schema": {
+            "kind": "string",
+            "pattern": "^[A-Z]{1,2}\\d[A-Z\\d]? ?\\d[A-Z]{2}$",
+            "normalise": "upper_trim",
+            "invalid_message": "That doesn't look like a UK postcode."
+          },
+          "assign": "postcode",
+          "on_invalid": "prompt_postcode",
+          "next": "call_lookup"
+        },
+
+        "call_lookup": {
+          "type": "call",
+          "method": "POST",
+          "url": "{{env.postoffice_base}}/v1/addresses/search",
+          "headers": { "Content-Type": "application/json" },
+          "body": { "postcode": { "$": "postcode" } },
+          "assign": "lookup",
+          "capture": {
+            "status": "status",
+            "addresses": {
+              "from": "body.addresses",
+              "pick": ["uprn", "single_line", "line1", "line2", "post_town", "postcode"],
+              "max_items": 50
+            },
+            "error_code": "body.code"
+          },
+          "catch": [ { "on": "any", "next": "record_failure" } ],
+          "next": "branch_results"
+        },
+
+        "branch_results": {
+          "type": "choice",
+          "rules": [
+            { "when": { "op": "and", "all": [
+                { "op": "eq", "path": "lookup.status", "value": 200 },
+                { "op": "not_empty", "path": "lookup.addresses" }
+              ] },
+              "next": "select_address" }
+          ],
+          "default": "record_failure"
+        },
+
+        "record_failure": {
+          "type": "assign",
+          "set": { "attempts": { "op": "add", "path": "attempts", "value": 1 } },
+          "next": "branch_attempts"
+        },
+        "branch_attempts": {
+          "type": "choice",
+          "rules": [
+            { "when": { "op": "lt", "path": "attempts", "value_path": "max_attempts" },
+              "next": "say_retry" }
+          ],
+          "default": "say_exhausted"
+        },
+        "say_retry": {
+          "type": "output",
+          "channel": "transcript",
+          "message": "We couldn't find that postcode. Please try again (attempt {{attempts}} of {{max_attempts}}).",
+          "next": "prompt_postcode"
+        },
+        "say_exhausted": {
+          "type": "output",
+          "channel": "transcript",
+          "message": "We were unable to look up that postcode. Please try again later.",
+          "next": "end_abandoned"
+        },
+        "end_abandoned": { "type": "end", "status": "failed", "outcome": "abandoned" },
+
+        "select_address": {
+          "type": "input",
+          "prompt": "Select your address.",
+          "schema": {
+            "kind": "select_one",
+            "options_from": "lookup.addresses",
+            "value_key": "uprn",
+            "label_key": "single_line"
+          },
+          "assign": "chosen",
+          "next": "end_ok"
+        },
+        "end_ok": {
+          "type": "end",
+          "status": "success",
+          "return": {
+            "line1":    { "$": "chosen.line1" },
+            "line2":    { "$": "chosen.line2" },
+            "town":     { "$": "chosen.post_town" },
+            "postcode": { "$": "chosen.postcode" },
+            "uprn":     { "$": "chosen.uprn" }
+          }
+        }
+      }
+    },
+
+    "manual_entry": {
+      "start": "prompt_address",
+      "states": {
+        "prompt_address": {
+          "type": "input",
+          "prompt": "Please enter your new address.",
+          "schema": {
+            "kind": "object",
+            "fields": [
+              { "name": "line1",    "kind": "string", "required": true,  "max_length": 60 },
+              { "name": "line2",    "kind": "string", "required": false, "max_length": 60 },
+              { "name": "town",     "kind": "string", "required": true,  "max_length": 40 },
+              { "name": "postcode", "kind": "string", "required": true,
+                "pattern": "^[A-Z]{1,2}\\d[A-Z\\d]? ?\\d[A-Z]{2}$", "normalise": "upper_trim" }
+            ]
+          },
+          "assign": "manual",
+          "on_invalid": "prompt_address",
+          "next": "end_ok"
+        },
+        "end_ok": {
+          "type": "end",
+          "status": "success",
+          "return": {
+            "line1":    { "$": "manual.line1" },
+            "line2":    { "$": "manual.line2" },
+            "town":     { "$": "manual.town" },
+            "postcode": { "$": "manual.postcode" },
+            "uprn":     null
+          }
+        }
+      }
+    },
+
+    "photo_update": {
+      "start": "ask_photo",
+      "vars": { "attempts": 0, "max_attempts": 3 },
+      "states": {
+        "ask_photo": {
+          "type": "input",
+          "prompt": "Do you need to provide a new photo?",
+          "schema": { "kind": "boolean" },
+          "assign": "wants_photo",
+          "next": "branch_photo"
+        },
+        "branch_photo": {
+          "type": "choice",
+          "rules": [ { "when": { "op": "is_true", "path": "wants_photo" }, "next": "prompt_upload" } ],
+          "default": "end_skipped"
+        },
+        "end_skipped": { "type": "end", "status": "success", "return": null },
+
+        "prompt_upload": {
+          "type": "input",
+          "prompt": "Please upload your photo.",
+          "schema": {
+            "kind": "file_ref",
+            "accept": ["image/jpeg", "image/png"],
+            "max_bytes": 10485760,
+            "declared_only": true
+          },
+          "assign": "photo",
+          "on_invalid": "prompt_upload",
+          "next": "call_upload"
+        },
+        "call_upload": {
+          "type": "call",
+          "method": "POST",
+          "url": "{{env.dvla_base}}/v1/photos",
+          "source_ref": { "$": "photo.ref" },
+          "encoding": "multipart",
+          "idempotency_key": "{{workflow_id}}:{{step}}",
+          "timeouts": { "start_to_close": "PT3M", "schedule_to_close": "PT15M", "heartbeat": "PT30S" },
+          "assign": "upload",
+          "capture": {
+            "status": "status",
+            "photo_id": "body.photo_id",
+            "code": "body.code",
+            "detail": { "from": "body.detail", "max_length": 300 }
+          },
+          "catch": [ { "on": "any", "next": "record_failure" } ],
+          "next": "branch_upload"
+        },
+        "branch_upload": {
+          "type": "choice",
+          "rules": [
+            { "when": { "op": "eq", "path": "upload.status", "value": 201 }, "next": "end_ok" },
+            { "when": { "op": "eq", "path": "upload.code", "value": "PHOTO_QUALITY" },
+              "next": "say_quality" }
+          ],
+          "default": "record_failure"
+        },
+        "say_quality": {
+          "type": "output",
+          "channel": "transcript",
+          "message": "That photo didn't meet the requirements: {{upload.detail}}",
+          "next": "record_failure"
+        },
+        "record_failure": {
+          "type": "assign",
+          "set": { "attempts": { "op": "add", "path": "attempts", "value": 1 } },
+          "next": "branch_attempts"
+        },
+        "branch_attempts": {
+          "type": "choice",
+          "rules": [
+            { "when": { "op": "lt", "path": "attempts", "value_path": "max_attempts" },
+              "next": "prompt_upload" }
+          ],
+          "default": "say_exhausted"
+        },
+        "say_exhausted": {
+          "type": "output",
+          "channel": "transcript",
+          "message": "We couldn't accept a photo after {{max_attempts}} attempts. Please start again later.",
+          "next": "end_abandoned"
+        },
+        "end_abandoned": { "type": "end", "status": "failed", "outcome": "abandoned" },
+        "end_ok": { "type": "end", "status": "success", "return": { "$": "upload.photo_id" } }
+      }
+    },
+
+    "address_update": {
+      "start": "submit",
+      "vars": { "poll_interval": "PT5M", "poll_window": "PT8H" },
+      "states": {
+        "submit": {
+          "type": "call",
+          "method": "POST",
+          "url": "{{env.dvla_base}}/v1/licence/address",
+          "headers": { "Content-Type": "application/json" },
+          "body": { "address": { "$": "input.address" }, "photo_id": { "$": "input.photo_id" } },
+          "idempotency_key": "{{workflow_id}}:address_update",
+          "timeouts": { "start_to_close": "PT1M", "schedule_to_close": "PT30M" },
+          "retry": {
+            "max_attempts": 5,
+            "initial_interval": "PT10S",
+            "backoff_coefficient": 2.0,
+            "max_interval": "PT5M",
+            "retry_on": ["5xx", "429", "timeout", "connection"]
+          },
+          "assign": "submission",
+          "capture": {
+            "status": "status",
+            "job_id": "body.job_id",
+            "code": "body.code",
+            "detail": { "from": "body.detail", "max_length": 300 }
+          },
+          "catch": [ { "on": "any", "next": "end_rejected" } ],
+          "next": "branch_accepted"
+        },
+        "branch_accepted": {
+          "type": "choice",
+          "rules": [
+            { "when": { "op": "eq", "path": "submission.status", "value": 202 }, "next": "set_deadline" }
+          ],
+          "default": "end_rejected"
+        },
+
+        "set_deadline": {
+          "type": "assign",
+          "set": { "deadline": { "op": "now_plus", "value_path": "poll_window" } },
+          "next": "say_holding"
+        },
+        "say_holding": {
+          "type": "output",
+          "channel": "transcript",
+          "message": "Your address update has been submitted and is being processed. This can take some time — we'll let you know as soon as it's done.",
+          "next": "wait"
+        },
+        "wait": { "type": "wait", "duration": { "$": "poll_interval" }, "next": "poll" },
+        "poll": {
+          "type": "call",
+          "method": "GET",
+          "url": "{{env.dvla_base}}/v1/jobs/{{submission.job_id}}",
+          "timeouts": { "start_to_close": "PT30S", "schedule_to_close": "PT3M" },
+          "assign": "job",
+          "capture": {
+            "status": "status",
+            "state": "body.state",
+            "detail": { "from": "body.detail", "max_length": 300 }
+          },
+          "catch": [ { "on": "any", "next": "branch_deadline" } ],
+          "next": "branch_job"
+        },
+        "branch_job": {
+          "type": "choice",
+          "rules": [
+            { "when": { "op": "eq", "path": "job.state", "value": "COMPLETED" }, "next": "notify_success" },
+            { "when": { "op": "eq", "path": "job.state", "value": "REJECTED" },  "next": "say_rejected" }
+          ],
+          "default": "branch_deadline"
+        },
+        "branch_deadline": {
+          "type": "choice",
+          "rules": [ { "when": { "op": "before_now", "path": "deadline" }, "next": "say_timeout" } ],
+          "default": "wait"
+        },
+
+        "say_rejected": {
+          "type": "output",
+          "channel": "transcript",
+          "message": "Your address update could not be completed: {{job.detail}}",
+          "next": "end_rejected"
+        },
+        "say_timeout": {
+          "type": "output",
+          "channel": "transcript",
+          "message": "Your update is taking longer than expected. We've referred it for manual review.",
+          "next": "end_rejected"
+        },
+
+        "notify_success": {
+          "type": "output",
+          "channel": "email",
+          "template": "coa_success",
+          "params": {
+            "line1":    { "$": "input.address.line1" },
+            "postcode": { "$": "input.address.postcode" }
+          },
+          "idempotency_key": "{{workflow_id}}:notify_success",
+          "also_transcript": "Your address has been updated. Your new licence will be delivered to {{input.address.line1}}, {{input.address.postcode}} within one week.",
+          "on_error": "continue",
+          "next": "end_ok"
+        },
+        "end_ok":       { "type": "end", "status": "success" },
+        "end_rejected": { "type": "end", "status": "failed", "outcome": "rejected" }
+      }
+    },
+
+    "finalisation": {
+      "start": "await_receipt",
+      "vars": { "reminder_after": "P4D", "total_window": "P7D" },
+      "states": {
+        "await_receipt": {
+          "type": "input",
+          "prompt": "Have you received your new driving licence?",
+          "schema": { "kind": "boolean" },
+          "assign": "received",
+          "timeout": { "after": { "$": "reminder_after" }, "next": "send_reminder" },
+          "next": "branch_receipt"
+        },
+        "send_reminder": {
+          "type": "output",
+          "channel": "email",
+          "template": "coa_receipt_reminder",
+          "params": { "postcode": { "$": "input.address.postcode" } },
+          "idempotency_key": "{{workflow_id}}:receipt_reminder",
+          "on_error": "continue",
+          "next": "await_receipt_final"
+        },
+        "await_receipt_final": {
+          "type": "input",
+          "prompt": "Have you received your new driving licence?",
+          "schema": { "kind": "boolean" },
+          "assign": "received",
+          "timeout": { "after": "P3D", "next": "say_no_response" },
+          "next": "branch_receipt"
+        },
+        "branch_receipt": {
+          "type": "choice",
+          "rules": [ { "when": { "op": "is_true", "path": "received" }, "next": "say_done" } ],
+          "default": "say_not_received"
+        },
+        "say_done": {
+          "type": "output",
+          "channel": "transcript",
+          "message": "Thank you — your change of address is complete.",
+          "next": "end_ok"
+        },
+        "say_not_received": {
+          "type": "output",
+          "channel": "transcript",
+          "message": "Sorry to hear that. We've opened a case and will be in touch.",
+          "next": "end_exception"
+        },
+        "say_no_response": {
+          "type": "output",
+          "channel": "transcript",
+          "message": "We haven't heard from you about your new licence. We've opened a case as a precaution.",
+          "next": "end_exception"
+        },
+        "end_ok":        { "type": "end", "status": "success" },
+        "end_exception": { "type": "end", "status": "failed", "outcome": "delivery_exception" }
+      }
+    }
+  }
+}

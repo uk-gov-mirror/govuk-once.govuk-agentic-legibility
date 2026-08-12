@@ -7,6 +7,9 @@ build:
 test:
     uv run pytest -vrrP --testdox --cov agents/src agents/tests
 
+test-poc:
+    uv run pytest -vrrP --testdox --cov durable_poc/src durable_poc/tests
+
 api:
     uv run uvicorn agents.src.workflow_executor.api:create_app --factory --reload --port 8001
 
@@ -28,7 +31,7 @@ types:
 docs:
     uvx --from pydoclint==0.9.1 pydoclint agents
 
-check: build test lint docs audit scan types
+check: build test test-poc lint docs audit scan types
 
 frontend-install:
     npm --prefix frontend install

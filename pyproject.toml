@@ -35,3 +35,8 @@ pythonpath = "."
 [tool.mypy]
 mypy_path = "."
 explicit_package_bases = true
+
+[tool.uv.workspace]
+members = [
+    "durable_poc",
+]
