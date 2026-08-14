@@ -23,12 +23,15 @@ dependencies = [
     { name = "docstring-parser" },
     { name = "dotenv" },
     { name = "fastapi" },
+    { name = "httpx" },
     { name = "mypy" },
+    { name = "pydantic" },
     { name = "pyjwt" },
     { name = "pyotp" },
     { name = "pytest-asyncio" },
     { name = "requests" },
     { name = "strands-agents" },
+    { name = "temporalio" },
     { name = "uvicorn" },
 ]
 
@@ -50,12 +53,15 @@ requires-dist = [
     { name = "docstring-parser", specifier = ">=0.18.0" },
     { name = "dotenv", specifier = ">=0.9.9" },
     { name = "fastapi", specifier = ">=0.128.2" },
+    { name = "httpx", specifier = ">=0.28.1" },
     { name = "mypy", specifier = ">=2.1.0" },
+    { name = "pydantic", specifier = ">=2.13.4" },
     { name = "pyjwt", specifier = ">=2.13.0" },
     { name = "pyotp", specifier = ">=2.10.0" },
     { name = "pytest-asyncio", specifier = ">=1.4.0" },
     { name = "requests", specifier = ">=2.34.2" },
     { name = "strands-agents", specifier = ">=1.50.2" },
+    { name = "temporalio", specifier = ">=1.31.0" },
     { name = "uvicorn", specifier = ">=0.48.0" },
 ]
 
@@ -532,18 +538,6 @@ wheels = [
 name = "durable-poc"
 version = "0.1.0"
 source = { virtual = "durable_poc" }
-dependencies = [
-    { name = "httpx" },
-    { name = "pydantic" },
-    { name = "temporalio" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "httpx", specifier = ">=0.28.1" },
-    { name = "pydantic", specifier = ">=2.13.4" },
-    { name = "temporalio", specifier = ">=1.31.0" },
-]
 
 [[package]]
 name = "fastapi"

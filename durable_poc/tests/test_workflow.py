@@ -12,7 +12,6 @@ from temporalio.client import WorkflowUpdateFailedError
 
 from src.activities import CallParams, NotifyParams, activity
 from src.context import InputSubmission
-from src.errors import InputValidationError
 from src.interpreter import SFSMInterpreter
 
 

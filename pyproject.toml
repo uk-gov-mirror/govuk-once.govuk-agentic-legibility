@@ -18,6 +18,9 @@ dependencies = [
     "requests>=2.34.2",
     "strands-agents>=1.50.2",
     "uvicorn>=0.48.0",
+    "httpx>=0.28.1",
+    "pydantic>=2.13.4",
+    "temporalio>=1.31.0"
 ]
 
 [dependency-groups]

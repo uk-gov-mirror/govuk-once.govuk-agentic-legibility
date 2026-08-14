@@ -114,7 +114,7 @@ class SFSMInterpreter:
                             lambda: self._input_ready_event.is_set(),
                             timeout=duration
                         )
-                    except workflow.TimeoutError:
+                    except asyncio.TimeoutError:
                         self._timeout_triggered = True
 
                 else:
@@ -246,7 +246,7 @@ class SFSMInterpreter:
                 frame.state_id = current_state.next
 
             elif isinstance(current_state, EndState):
-                popped = self.state.frames.pop()
+                self.state.frames.pop()
                 if self.state.frames:
                     parent_frame = self.state.frames[-1]
                     parent_state = self.definition.processes[parent_frame.process_id].states[parent_frame.state_id]
@@ -255,8 +255,8 @@ class SFSMInterpreter:
                         if current_state.outcome and parent_state.catch:
                             caught = False
                             for c in parent_state.catch:
-                                if c["on"] == current_state.outcome or c["on"] == "any":
-                                    parent_frame.state_id = c["next"]
+                                if c.on == current_state.outcome or c.on == "any":
+                                    parent_frame.state_id = c.next
                                     caught = True
                                     break
                             if not caught:
@@ -294,7 +294,7 @@ class SFSMInterpreter:
         if kind == "string" and not isinstance(val, str):
             raise InputValidationError("Expected string")
         if kind == "string" and "pattern" in schema:
-            if not re.match(schema["pattern"], val):
+            if not re.match(str(schema["pattern"]), str(val)):
                 raise InputValidationError(schema.get("invalid_message", "Invalid format"))
         # Further schema validations (enum, object, etc.) would be handled similarly here
 

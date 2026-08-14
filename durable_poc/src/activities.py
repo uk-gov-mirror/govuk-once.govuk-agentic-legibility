@@ -7,7 +7,7 @@ from dataclasses import dataclass
 import httpx
 from temporalio import activity
 
-from src.errors import RetryableHttpError, ValidationError
+from src.errors import RetryableHttpError
 
 logger = logging.getLogger(__name__)
 
