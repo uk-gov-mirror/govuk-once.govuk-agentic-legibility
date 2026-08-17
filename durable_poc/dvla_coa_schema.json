@@ -140,7 +140,7 @@
           "prompt": "Please enter your new postcode.",
           "schema": {
             "kind": "string",
-            "pattern": "^[A-Z]{1,2}\\d[A-Z\\d]? ?\\d[A-Z]{2}$",
+            "pattern": "[A-Z]{1,2}\\d[A-Z\\d]?\\s*\\d[A-Z]{2}",
             "normalise": "upper_trim",
             "invalid_message": "That doesn't look like a UK postcode."
           },

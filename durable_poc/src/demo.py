@@ -11,39 +11,45 @@ from src.context import InputSubmission
 
 async def main() -> None:
     # Connect to standard local Temporal server
+    print("Connecting to server...")
     client = await Client.connect("localhost:7233")
     
     # Load your schema (assuming it's saved as workflow.json)
+    print("Loading definition...")
     file_path = Path(f"{os.getcwd()}/durable_poc/dvla_coa_schema.json")
     with open(file_path, "r") as f:
         definition = json.load(f)
         
     # Patch long timeouts for human interaction
     # Change 5-minute poll interval to 2 seconds, and 4-day wait to 10 seconds
+    print("Patching time intervals...")
     definition["processes"]["address_update"]["vars"]["poll_interval"] = "PT2S"
     definition["processes"]["finalisation"]["vars"]["reminder_after"] = "PT10S"
+
+    definition.setdefault("vars", {})["env"] = {
+        "dvla_base": "http://localhost:8000/app/photo",
+        "postoffice_base": "http://localhost:8000/app/postoffice"
+    }
     
     print("Starting Change of Address Workflow...")
     
     # Start the workflow
     handle = await client.start_workflow(
         "SFSMInterpreter",
-        args=[definition, {
-                "env": {
-                    "dvla_base": "http://localhost:8000",
-                    "postoffice_base": "http://localhost:8000"
-                }
-            }],
+        args=[definition, None],
         id="interactive-demo",
         task_queue="sfsm-queue",
     )
-    
+
+    print("Workflow started...")
     printed_transcript_len = 0
     
     while True:
         # 1. Check if the workflow has finished
         description = await handle.describe()
+        print(f"Workflow status: {description.status}")
         if description.status != WorkflowExecutionStatus.RUNNING:
+            print(f"Description: {description}")
             result = await handle.result()
             print(f"\n✅ Workflow Complete!")
             print(f"Outcome: {result}")
@@ -62,6 +68,8 @@ async def main() -> None:
         if awaiting:
             schema = awaiting["schema"]
             kind = schema.get("kind")
+
+            print(f"Awaiting: {awaiting}")
             
             print(f"\n🔵 {awaiting['prompt']}")
             
@@ -91,6 +99,8 @@ async def main() -> None:
                     "content_type": content_type,
                     "bytes": os.path.getsize(path) if os.path.exists(path) else 1024
                 }
+            else:
+                val = raw_val.strip()
                 
             print("Submitting...")
             try:
