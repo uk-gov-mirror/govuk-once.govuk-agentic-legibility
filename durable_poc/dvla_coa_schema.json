@@ -152,7 +152,7 @@
         "call_lookup": {
           "type": "call",
           "method": "POST",
-          "url": "{{env.postoffice_base}}/v1/addresses/search",
+          "url": "{{env.postoffice_base}}/v1/address_from_postcode",
           "headers": { "Content-Type": "application/json" },
           "body": { "postcode": { "$": "postcode" } },
           "assign": "lookup",
@@ -243,9 +243,9 @@
           "schema": {
             "kind": "object",
             "fields": [
-              { "name": "line1",    "kind": "string", "required": true,  "max_length": 60 },
-              { "name": "line2",    "kind": "string", "required": false, "max_length": 60 },
-              { "name": "town",     "kind": "string", "required": true,  "max_length": 40 },
+              { "name": "address_line_1",    "kind": "string", "required": true,  "max_length": 60 },
+              { "name": "address_line_2",    "kind": "string", "required": false, "max_length": 60 },
+              { "name": "town_or_city",     "kind": "string", "required": true,  "max_length": 40 },
               { "name": "postcode", "kind": "string", "required": true,
                 "pattern": "^[A-Z]{1,2}\\d[A-Z\\d]? ?\\d[A-Z]{2}$", "normalise": "upper_trim" }
             ]
@@ -258,9 +258,9 @@
           "type": "end",
           "status": "success",
           "return": {
-            "line1":    { "$": "manual.line1" },
-            "line2":    { "$": "manual.line2" },
-            "town":     { "$": "manual.town" },
+            "address_line_1":    { "$": "manual.line1" },
+            "address_line_2":    { "$": "manual.line2" },
+            "town_or_city":     { "$": "manual.town" },
             "postcode": { "$": "manual.postcode" },
             "uprn":     null
           }
