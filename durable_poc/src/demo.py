@@ -1,0 +1,114 @@
+"""Interactive terminal CLI for the FSM workflow."""
+
+import asyncio
+import json
+from pathlib import Path
+import os
+
+from temporalio.client import Client, WorkflowExecutionStatus
+from src.context import InputSubmission
+
+
+async def main() -> None:
+    # Connect to standard local Temporal server
+    client = await Client.connect("localhost:7233")
+    
+    # Load your schema (assuming it's saved as workflow.json)
+    file_path = Path(f"{os.getcwd()}/durable_poc/dvla_coa_schema.json")
+    with open(file_path, "r") as f:
+        definition = json.load(f)
+        
+    # Patch long timeouts for human interaction
+    # Change 5-minute poll interval to 2 seconds, and 4-day wait to 10 seconds
+    definition["processes"]["address_update"]["vars"]["poll_interval"] = "PT2S"
+    definition["processes"]["finalisation"]["vars"]["reminder_after"] = "PT10S"
+    
+    print("Starting Change of Address Workflow...")
+    
+    # Start the workflow
+    handle = await client.start_workflow(
+        "SFSMInterpreter",
+        args=[definition, {
+                "env": {
+                    "dvla_base": "http://localhost:8000",
+                    "postoffice_base": "http://localhost:8000"
+                }
+            }],
+        id="interactive-demo",
+        task_queue="sfsm-queue",
+    )
+    
+    printed_transcript_len = 0
+    
+    while True:
+        # 1. Check if the workflow has finished
+        description = await handle.describe()
+        if description.status != WorkflowExecutionStatus.RUNNING:
+            result = await handle.result()
+            print(f"\n✅ Workflow Complete!")
+            print(f"Outcome: {result}")
+            break
+
+        # 2. Print any new transcript messages
+        transcript = await handle.query("transcript")
+        if len(transcript) > printed_transcript_len:
+            for entry in transcript[printed_transcript_len:]:
+                print(f"\n📩 [Message]: {entry['message']}")
+            printed_transcript_len = len(transcript)
+
+        # 3. Check if the workflow is waiting for input
+        awaiting = await handle.query("awaiting")
+        
+        if awaiting:
+            schema = awaiting["schema"]
+            kind = schema.get("kind")
+            
+            print(f"\n🔵 {awaiting['prompt']}")
+            
+            # If it's a select list, render the options
+            if kind == "select_one" and awaiting.get("options"):
+                for opt in awaiting["options"]:
+                    val_key = schema["value_key"]
+                    lbl_key = schema["label_key"]
+                    print(f"   [{opt[val_key]}] {opt[lbl_key]}")
+            
+            raw_val = input("> ")
+
+            val = None
+            
+            # Coerce boolean inputs
+            if kind == "boolean":
+                val = raw_val.strip().lower() in ["y", "yes", "true", "1"]
+            elif kind == "file_ref":
+                path = raw_val.strip()
+                
+                # Guess content type for the FSM schema requirements
+                content_type = "image/png" if path.lower().endswith(".png") else "image/jpeg"
+                
+                # Create the payload the FSM actually expects
+                val = {
+                    "ref": path,
+                    "content_type": content_type,
+                    "bytes": os.path.getsize(path) if os.path.exists(path) else 1024
+                }
+                
+            print("Submitting...")
+            try:
+                await handle.execute_update(
+                    "submit_input", 
+                    InputSubmission(token=awaiting["token"], value=val)
+                )
+            except Exception as e:
+                # E.g., validation errors returned synchronously from the update validator
+                print(f"❌ Input rejected: {e}")
+                
+        else:
+            # Workflow is busy processing an activity or waiting on a timer
+            await asyncio.sleep(1)
+
+
+if __name__ == "__main__":
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        print("\nDemo terminated.")

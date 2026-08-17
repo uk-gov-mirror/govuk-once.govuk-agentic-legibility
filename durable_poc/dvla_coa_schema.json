@@ -302,7 +302,7 @@
         "call_upload": {
           "type": "call",
           "method": "POST",
-          "url": "{{env.dvla_base}}/v1/photos",
+          "url": "{{env.dvla_base}}/v1/photo",
           "source_ref": { "$": "photo.ref" },
           "encoding": "multipart",
           "idempotency_key": "{{workflow_id}}:{{step}}",

@@ -109,3 +109,5 @@ coverage/
 
 # SvelteKit
 .svelte-kit/
+
+*.jpeg
