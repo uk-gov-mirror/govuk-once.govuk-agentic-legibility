@@ -152,7 +152,8 @@
         "call_lookup": {
           "type": "call",
           "method": "POST",
-          "url": "{{env.postoffice_base}}/v1/address_from_postcode",
+          "service": "postoffice",
+          "url": "/app/postoffice/v1/address_from_postcode",
           "headers": { "Content-Type": "application/json" },
           "body": { "postcode": { "$": "postcode" } },
           "assign": "lookup",
@@ -302,7 +303,8 @@
         "call_upload": {
           "type": "call",
           "method": "POST",
-          "url": "{{env.dvla_base}}/v1/photo",
+          "service": "dvla",
+          "url": "/app/dvla/v1/photo",
           "source_ref": { "$": "photo.ref" },
           "encoding": "multipart",
           "idempotency_key": "{{workflow_id}}:{{step}}",
@@ -363,7 +365,8 @@
         "submit": {
           "type": "call",
           "method": "POST",
-          "url": "{{env.dvla_base}}/v1/licence/address",
+          "service": "dvla",
+          "url": "/app/dvla/v1/licence/address",
           "headers": { "Content-Type": "application/json" },
           "body": { "address": { "$": "input.address" }, "photo_id": { "$": "input.photo_id" } },
           "idempotency_key": "{{workflow_id}}:address_update",
@@ -408,7 +411,8 @@
         "poll": {
           "type": "call",
           "method": "GET",
-          "url": "{{env.dvla_base}}/v1/jobs/{{submission.job_id}}",
+          "service": "dvla",
+          "url": "/app/dvla/v1/jobs/{{submission.job_id}}",
           "timeouts": { "start_to_close": "PT30S", "schedule_to_close": "PT3M" },
           "assign": "job",
           "capture": {

@@ -48,6 +48,7 @@ class CallState(BaseState):
     type: Literal["call"] = "call"
     method: str
     url: str
+    service: str
     headers: dict[str, str] | None = None
     body: dict[str, Any] | None = None
     source_ref: dict[str, Any] | None = None

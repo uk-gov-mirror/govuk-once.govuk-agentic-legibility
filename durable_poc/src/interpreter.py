@@ -18,6 +18,9 @@ with workflow.unsafe.imports_passed_through():
     from src.context import AwaitingInput, InputSubmission, InterpreterState, StackFrame, TranscriptEntry
     from src.paths import interpolate, parse_duration, resolve_dict, resolve_path, set_path
     from src.predicates import evaluate
+    import pydantic_core
+    import pydantic_core._pydantic_core
+    import pydantic_core.core_schema
     import pydantic
     import src.activities as activities
     from src.errors import DefinitionError, InputValidationError
@@ -164,16 +167,16 @@ class SFSMInterpreter:
                 frame.state_id = current_state.next
 
             elif isinstance(current_state, CallState):
-                url = interpolate(current_state.url, context)
                 body = resolve_dict(current_state.body or {}, context)
                 headers = current_state.headers or {}
 
                 call_params = activities.CallParams(
                     method=current_state.method,
-                    url=url,
+                    url=current_state.url,
                     headers=headers,
                     body=body,
-                    capture=current_state.capture
+                    capture=current_state.capture, 
+                    service=current_state.service
                 )
 
                 retry_pol = RetryPolicy(

@@ -3,6 +3,7 @@
 import logging
 from typing import Any
 from dataclasses import dataclass
+import os
 
 import httpx
 from temporalio import activity
@@ -16,6 +17,7 @@ logger = logging.getLogger(__name__)
 class CallParams:
     method: str
     url: str
+    service: str
     headers: dict[str, str] | None
     body: dict[str, Any] | None
     capture: dict[str, Any]
@@ -24,11 +26,20 @@ class CallParams:
 @activity.defn
 async def http_call(params: CallParams) -> dict[str, Any]:
     """Execute an HTTP call and return a projected snapshot."""
+    if params.service == "dvla":
+        base_url = os.environ.get("DVLA_BASE", "http://localhost:8000")
+    elif params.service == "postoffice":
+        base_url = os.environ.get("POSTOFFICE_BASE", "http://localhost:8000")
+    else:
+        base_url = ""
+
+    full_url = f"{base_url}{params.url}"
+
     async with httpx.AsyncClient() as client:
         try:
             response = await client.request(
                 method=params.method,
-                url=params.url,
+                url=full_url,
                 headers=params.headers,
                 json=params.body,
                 timeout=15.0,
