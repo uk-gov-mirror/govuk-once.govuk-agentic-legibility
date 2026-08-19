@@ -169,10 +169,11 @@ class SFSMInterpreter:
             elif isinstance(current_state, CallState):
                 body = resolve_dict(current_state.body or {}, context)
                 headers = current_state.headers or {}
+                url = interpolate(current_state.url, context=context)
 
                 call_params = activities.CallParams(
                     method=current_state.method,
-                    url=current_state.url,
+                    url=url,
                     headers=headers,
                     body=body,
                     capture=current_state.capture, 

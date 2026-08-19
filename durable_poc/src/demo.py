@@ -47,9 +47,7 @@ async def main() -> None:
     while True:
         # 1. Check if the workflow has finished
         description = await handle.describe()
-        print(f"Workflow status: {description.status}")
         if description.status != WorkflowExecutionStatus.RUNNING:
-            print(f"Description: {description}")
             result = await handle.result()
             print(f"\n✅ Workflow Complete!")
             print(f"Outcome: {result}")
@@ -68,8 +66,6 @@ async def main() -> None:
         if awaiting:
             schema = awaiting["schema"]
             kind = schema.get("kind")
-
-            print(f"Awaiting: {awaiting}")
             
             print(f"\n🔵 {awaiting['prompt']}")
             
@@ -99,6 +95,20 @@ async def main() -> None:
                     "content_type": content_type,
                     "bytes": os.path.getsize(path) if os.path.exists(path) else 1024
                 }
+            elif kind == "select_one" and awaiting.get("options"):
+                raw_str = raw_val.strip()
+                val_key = schema.get("value_key")
+                
+                # Find the full dictionary in the options list matching the UPRN
+                selected_opt = next(
+                    (opt for opt in awaiting["options"] if str(opt.get(val_key)) == raw_str), 
+                    None
+                )
+                
+                if selected_opt:
+                    val = selected_opt
+                else:
+                    val = raw_str
             else:
                 val = raw_val.strip()
                 
