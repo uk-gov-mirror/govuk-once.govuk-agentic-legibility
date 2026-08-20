@@ -48,6 +48,12 @@ async def main() -> None:
         # 1. Check if the workflow has finished
         description = await handle.describe()
         if description.status != WorkflowExecutionStatus.RUNNING:
+            # Drain remaining transcript entries before exiting
+            transcript = await handle.query("transcript")
+            if len(transcript) > printed_transcript_len:
+                for entry in transcript[printed_transcript_len:]:
+                    print(f"\n📩 [Message]: {entry['message']}")
+
             result = await handle.result()
             print(f"\n✅ Workflow Complete!")
             print(f"Outcome: {result}")
@@ -66,17 +72,28 @@ async def main() -> None:
         if awaiting:
             schema = awaiting["schema"]
             kind = schema.get("kind")
+            timeout_sec = awaiting.get("timeout_seconds")
             
             print(f"\n🔵 {awaiting['prompt']}")
             
             # If it's a select list, render the options
             if kind == "select_one" and awaiting.get("options"):
                 for opt in awaiting["options"]:
-                    val_key = schema["value_key"]
-                    lbl_key = schema["label_key"]
-                    print(f"   [{opt[val_key]}] {opt[lbl_key]}")
+                    print(f"   [{opt[schema['value_key']]}] {opt[schema['label_key']]}")
             
-            raw_val = input("> ")
+            # Non-blocking input if workflow provided timeout_seconds, else standard blocking input
+            raw_val = None
+            if timeout_sec:
+                try:
+                    raw_val = await asyncio.wait_for(
+                        asyncio.to_thread(input, "> "), 
+                        timeout=timeout_sec + 0.5
+                    )
+                except asyncio.TimeoutError:
+                    print("\n⌛ Input timed out waiting for user response...")
+                    continue
+            else:
+                raw_val = input("> ")
 
             val = None
             

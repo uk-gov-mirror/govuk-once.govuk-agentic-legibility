@@ -32,6 +32,7 @@ class AwaitingInput:
     prompt: str
     schema: dict[str, Any]
     options: Any | None = None
+    timeout_seconds: float | None = None
 
 
 @dataclass

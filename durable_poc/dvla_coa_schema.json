@@ -477,30 +477,22 @@
           "prompt": "Have you received your new driving licence?",
           "schema": { "kind": "boolean" },
           "assign": "received",
-          "timeout": { "after": { "$": "reminder_after" }, "next": "send_reminder" },
-          "next": "branch_receipt"
-        },
-        "send_reminder": {
-          "type": "output",
-          "channel": "email",
-          "template": "coa_receipt_reminder",
-          "params": { "postcode": { "$": "input.address.postcode" } },
-          "idempotency_key": "{{workflow_id}}:receipt_reminder",
-          "on_error": "continue",
-          "next": "await_receipt_final"
-        },
-        "await_receipt_final": {
-          "type": "input",
-          "prompt": "Have you received your new driving licence?",
-          "schema": { "kind": "boolean" },
-          "assign": "received",
-          "timeout": { "after": "P3D", "next": "say_no_response" },
+          "timeout": { "after": { "$": "reminder_after" }, "next": "send_reminder_no_response" },
           "next": "branch_receipt"
         },
         "branch_receipt": {
           "type": "choice",
           "rules": [ { "when": { "op": "is_true", "path": "received" }, "next": "say_done" } ],
           "default": "say_not_received"
+        },
+        "send_reminder_no_response": {
+          "type": "output",
+          "channel": "email",
+          "template": "coa_receipt_reminder",
+          "params": { "postcode": { "$": "input.address.postcode" } },
+          "idempotency_key": "{{workflow_id}}:receipt_reminder",
+          "on_error": "continue",
+          "next": "say_no_response"
         },
         "say_done": {
           "type": "output",

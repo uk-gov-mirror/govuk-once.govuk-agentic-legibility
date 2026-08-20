@@ -1,6 +1,5 @@
 """The durable workflow executor loop."""
 
-import logging
 import re
 from datetime import timedelta
 from typing import Any
@@ -25,8 +24,6 @@ with workflow.unsafe.imports_passed_through():
     import src.activities as activities
     from src.errors import DefinitionError, InputValidationError
 
-logger = logging.getLogger(__name__)
-
 
 @workflow.defn
 class SFSMInterpreter:
@@ -45,17 +42,24 @@ class SFSMInterpreter:
         try:
             self.definition = SFSMDefinition.model_validate(definition_dict)
         except pydantic.ValidationError as e:
+            workflow.logger.error(f"❌ Definition validation failed: {e}")
             raise DefinitionError(f"Invalid workflow definition: {e}") from e
 
         if initial_state:
             self.state = initial_state
+            workflow.logger.info(f"Resuming workflow from initial_state context with frames: {self.state.frames}")
         else:
             entry_process = self.definition.processes[self.definition.entry]
+            initial_vars = entry_process.vars.copy()
             self.state.frames.append(StackFrame(
                 process_id=self.definition.entry,
                 state_id=entry_process.start,
-                vars=entry_process.vars.copy()
+                vars=initial_vars
             ))
+            workflow.logger.info(
+                f"Started workflow entry process '{self.definition.entry}' at state '{entry_process.start}' "
+                f"with initial vars: {initial_vars}"
+            )
 
         max_transcript_length = 100
         min_steps_between_can = 0
@@ -66,6 +70,7 @@ class SFSMInterpreter:
 
         while self.state.frames:
             if workflow.info().is_continue_as_new_suggested() and steps_this_run >= min_steps_between_can:
+                workflow.logger.info("Executing Continue-As-New...")
                 workflow.continue_as_new("SFSMInterpreter", args=[definition_dict, self.state])
 
             self.state.step_counter += 1
@@ -75,7 +80,12 @@ class SFSMInterpreter:
             current_state = process.states.get(frame.state_id)
 
             if not current_state:
+                workflow.logger.error(f"❌ State '{frame.state_id}' not found in process '{frame.process_id}'")
                 raise DefinitionError(f"State {frame.state_id} not found in {frame.process_id}")
+
+            workflow.logger.info(
+                f"[Step {self.state.step_counter}] [{frame.process_id}:{frame.state_id}] ({type(current_state).__name__})"
+            )
 
             # Prepare context for this step
             context = {
@@ -95,15 +105,23 @@ class SFSMInterpreter:
                 if current_state.schema_.options_from:
                     options = resolve_path(context, current_state.schema_.options_from)
 
+                timeout_sec = None
+                if current_state.timeout:
+                    timeout_str = resolve_dict(current_state.timeout["after"], context)
+                    timeout_sec = parse_duration(timeout_str).total_seconds()
+
                 self._awaiting_input = AwaitingInput(
                     token=token,
                     prompt=current_state.prompt,
                     schema=current_state.schema_.model_dump(by_alias=True, exclude_none=True),
-                    options=options
+                    options=options,
+                    timeout_seconds=timeout_sec
                 )
                 self._received_input = None
                 self._timeout_triggered = False
                 self._input_ready_event.clear()
+
+                workflow.logger.info(f" Awaiting input token='{token}' prompt='{current_state.prompt}'")
 
                 if current_state.timeout:
                     timeout_str = resolve_dict(current_state.timeout["after"], context)
@@ -112,6 +130,7 @@ class SFSMInterpreter:
                     else:
                         raise DefinitionError("Timeout after must resolve to duration string")
 
+                    workflow.logger.info(f"⏱ Timeout set for {duration} seconds")
                     try:
                         await workflow.wait_condition(
                             lambda: self._input_ready_event.is_set(),
@@ -119,6 +138,7 @@ class SFSMInterpreter:
                         )
                     except asyncio.TimeoutError:
                         self._timeout_triggered = True
+                        workflow.logger.warn(f"⚠️ Input timed out at state '{frame.state_id}'")
 
                 else:
                     await workflow.wait_condition(lambda: self._input_ready_event.is_set())
@@ -127,10 +147,14 @@ class SFSMInterpreter:
 
                 if self._timeout_triggered:
                     if current_state.timeout and "next" in current_state.timeout:
+                        workflow.logger.info(f"➡️ Timeout transition to '{current_state.timeout['next']}'")
                         frame.state_id = current_state.timeout["next"]
                         continue
                     raise DefinitionError("Timeout triggered without next route")
                 else:
+                    workflow.logger.info(
+                        f" Input received for '{current_state.assign}': val={self._received_input} (type={type(self._received_input).__name__})"
+                    )
                     set_path(frame.vars, current_state.assign, self._received_input)
                     frame.state_id = current_state.next
 
@@ -138,6 +162,7 @@ class SFSMInterpreter:
                 if current_state.channel == "transcript" or current_state.also_transcript:
                     msg = current_state.also_transcript or current_state.message or ""
                     msg = interpolate(msg, context)
+                    workflow.logger.info(f" Transcript output: '{msg}'")
                     self.state.transcript.append(TranscriptEntry(
                         step=self.state.step_counter,
                         timestamp=workflow.now().isoformat(),
@@ -153,6 +178,7 @@ class SFSMInterpreter:
                         template=current_state.template or "",
                         params=resolve_dict(current_state.params or {}, context)
                     )
+                    workflow.logger.info(f" Sending notification via '{current_state.channel}'")
                     try:
                         await workflow.execute_activity(
                             activities.notify,
@@ -161,6 +187,7 @@ class SFSMInterpreter:
                             retry_policy=RetryPolicy(maximum_attempts=5)
                         )
                     except Exception as e:
+                        workflow.logger.error(f"❌ Notification activity failed: {e}")
                         if current_state.on_error != "continue":
                             raise e
                 
@@ -185,17 +212,19 @@ class SFSMInterpreter:
                     non_retryable_error_types=["ValidationError", "ApplicationError"]
                 )
 
+                workflow.logger.info(f"🌐 HTTP {current_state.method} -> {url}")
                 try:
                     result = await workflow.execute_activity(
                         activities.http_call,
                         call_params,
                         start_to_close_timeout=timedelta(seconds=30),
-                        retry_policy=retry_pol
+                        retry_policy=RetryPolicy(maximum_attempts=3)
                     )
                     set_path(frame.vars, current_state.assign, result)
                     frame.state_id = current_state.next
                 except Exception as e:
                     # simplistic catch routing
+                    workflow.logger.error(f"❌ CallState activity error: {e}")
                     handled = False
                     if current_state.catch:
                         for c in current_state.catch:
@@ -208,12 +237,16 @@ class SFSMInterpreter:
 
             elif isinstance(current_state, ChoiceState):
                 matched = False
-                for rule in current_state.rules:
-                    if evaluate(rule.when, context):
+                for idx, rule in enumerate(current_state.rules):
+                    eval_res = evaluate(rule.when, context)
+                    workflow.logger.info(f" Evaluating rule {idx}: when={rule.when} -> {eval_res}")
+                    if eval_res:
+                        workflow.logger.info(f"✅ Rule {idx} matched. Transitioning to '{rule.next}'")
                         frame.state_id = rule.next
                         matched = True
                         break
                 if not matched:
+                    workflow.logger.info(f"⚠️ No rules matched. Fallback to default '{current_state.default}'")
                     frame.state_id = current_state.default
 
             elif isinstance(current_state, AssignState):
@@ -230,6 +263,7 @@ class SFSMInterpreter:
                                 set_path(frame.vars, k, dt.isoformat())
                     else:
                         set_path(frame.vars, k, resolve_dict(v, context))
+                    workflow.logger.info(f" Assigned '{k}' = {frame.vars.get(k)}")
                 frame.state_id = current_state.next
 
             elif isinstance(current_state, InvokeState):
@@ -239,17 +273,31 @@ class SFSMInterpreter:
                     state_id=target_proc.start,
                     vars=target_proc.vars.copy()
                 )
+                
+                # Resolve sub-process input arguments
+                resolved_inputs = {}
                 if current_state.input:
-                    new_frame.vars["input"] = resolve_dict(current_state.input, context)
+                    resolved_inputs = resolve_dict(current_state.input, context)
+                    new_frame.vars["input"] = resolved_inputs
+
+                workflow.logger.info(
+                    f" Invoking sub-process '{current_state.process}' "
+                    f"with inputs: {resolved_inputs} | Frame variables initialized to: {new_frame.vars}"
+                )
                 self.state.frames.append(new_frame)
 
             elif isinstance(current_state, WaitState):
                 dur_val = resolve_dict(current_state.duration, context)
+                workflow.logger.info(f"💤 Sleeping for {dur_val}")
                 if isinstance(dur_val, str):
                     await workflow.sleep(parse_duration(dur_val))
                 frame.state_id = current_state.next
 
             elif isinstance(current_state, EndState):
+                workflow.logger.info(
+                    f"🏁 Reached EndState '{frame.state_id}' in process '{frame.process_id}' "
+                    f"(status={current_state.status}, outcome={current_state.outcome}) | Final vars: {frame.vars}"
+                )
                 self.state.frames.pop()
                 if self.state.frames:
                     parent_frame = self.state.frames[-1]
@@ -269,6 +317,7 @@ class SFSMInterpreter:
                             if parent_state.assign:
                                 ret_val = resolve_dict(current_state.return_, context)
                                 set_path(parent_frame.vars, parent_state.assign, ret_val)
+                                workflow.logger.info(f"↩️ Returned {ret_val} into parent var '{parent_state.assign}'")
                             parent_frame.state_id = parent_state.next
                 else:
                     return {
@@ -279,14 +328,17 @@ class SFSMInterpreter:
 
     @workflow.update
     async def submit_input(self, msg: InputSubmission) -> None:
+        workflow.logger.info(f"📩 Input submitted via update: val={msg.value}")
         self._received_input = msg.value
         self._input_ready_event.set()
 
     @submit_input.validator
     def _validate_input(self, msg: InputSubmission) -> None:
         if not self._awaiting_input:
+            workflow.logger.warn("❌ Rejected update: Workflow is not awaiting input")
             raise InputValidationError("Not awaiting input")
         if msg.token != self._awaiting_input.token:
+            workflow.logger.warn(f"❌ Rejected update: Token mismatch ({msg.token} != {self._awaiting_input.token})")
             raise InputValidationError(f"Token mismatch. Expected {self._awaiting_input.token}")
         
         schema = self._awaiting_input.schema
@@ -294,9 +346,9 @@ class SFSMInterpreter:
         val = msg.value
 
         if kind == "boolean" and not isinstance(val, bool):
-            raise InputValidationError("Expected boolean")
+            raise InputValidationError(f"Expected boolean, received {type(val).__name__}")
         if kind == "string" and not isinstance(val, str):
-            raise InputValidationError("Expected string")
+            raise InputValidationError(f"Expected string, received {type(val).__name__}")
         if kind == "string" and "pattern" in schema:
             if not re.match(str(schema["pattern"]), str(val)):
                 raise InputValidationError(schema.get("invalid_message", "Invalid format"))
