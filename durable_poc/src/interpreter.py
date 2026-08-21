@@ -89,7 +89,7 @@ class SFSMInterpreter:
 
             # Prepare context for this step
             context = {
-                "input": self.state.env,
+                "input": frame.vars.get("input", {}),
                 "env": self.state.env,
                 "workflow_id": workflow.info().workflow_id,
                 "step": self.state.step_counter,
@@ -110,9 +110,12 @@ class SFSMInterpreter:
                     timeout_str = resolve_dict(current_state.timeout["after"], context)
                     timeout_sec = parse_duration(timeout_str).total_seconds()
 
+                # Interpolate variable tags in the prompt template
+                prompt_text = interpolate(current_state.prompt, context)
+
                 self._awaiting_input = AwaitingInput(
                     token=token,
-                    prompt=current_state.prompt,
+                    prompt=prompt_text,
                     schema=current_state.schema_.model_dump(by_alias=True, exclude_none=True),
                     options=options,
                     timeout_seconds=timeout_sec
@@ -121,7 +124,7 @@ class SFSMInterpreter:
                 self._timeout_triggered = False
                 self._input_ready_event.clear()
 
-                workflow.logger.info(f" Awaiting input token='{token}' prompt='{current_state.prompt}'")
+                workflow.logger.info(f"Awaiting input token='{token}' prompt='{current_state.prompt}'")
 
                 if current_state.timeout:
                     timeout_str = resolve_dict(current_state.timeout["after"], context)
@@ -153,7 +156,7 @@ class SFSMInterpreter:
                     raise DefinitionError("Timeout triggered without next route")
                 else:
                     workflow.logger.info(
-                        f" Input received for '{current_state.assign}': val={self._received_input} (type={type(self._received_input).__name__})"
+                        f"Input received for '{current_state.assign}': val={self._received_input} (type={type(self._received_input).__name__})"
                     )
                     set_path(frame.vars, current_state.assign, self._received_input)
                     frame.state_id = current_state.next
@@ -162,7 +165,7 @@ class SFSMInterpreter:
                 if current_state.channel == "transcript" or current_state.also_transcript:
                     msg = current_state.also_transcript or current_state.message or ""
                     msg = interpolate(msg, context)
-                    workflow.logger.info(f" Transcript output: '{msg}'")
+                    workflow.logger.info(f"Transcript output: '{msg}'")
                     self.state.transcript.append(TranscriptEntry(
                         step=self.state.step_counter,
                         timestamp=workflow.now().isoformat(),
@@ -178,7 +181,7 @@ class SFSMInterpreter:
                         template=current_state.template or "",
                         params=resolve_dict(current_state.params or {}, context)
                     )
-                    workflow.logger.info(f" Sending notification via '{current_state.channel}'")
+                    workflow.logger.info(f"Sending notification via '{current_state.channel}'")
                     try:
                         await workflow.execute_activity(
                             activities.notify,
@@ -187,7 +190,7 @@ class SFSMInterpreter:
                             retry_policy=RetryPolicy(maximum_attempts=5)
                         )
                     except Exception as e:
-                        workflow.logger.error(f"❌ Notification activity failed: {e}")
+                        workflow.logger.error(f"Notification activity failed: {e}")
                         if current_state.on_error != "continue":
                             raise e
                 
@@ -204,7 +207,7 @@ class SFSMInterpreter:
                     headers=headers,
                     body=body,
                     capture=current_state.capture, 
-                    service=current_state.service
+                    service=current_service if (current_service := getattr(current_state, "service", None)) else None
                 )
 
                 retry_pol = RetryPolicy(
@@ -218,13 +221,13 @@ class SFSMInterpreter:
                         activities.http_call,
                         call_params,
                         start_to_close_timeout=timedelta(seconds=30),
-                        retry_policy=RetryPolicy(maximum_attempts=3)
+                        retry_policy=retry_pol
                     )
                     set_path(frame.vars, current_state.assign, result)
                     frame.state_id = current_state.next
                 except Exception as e:
                     # simplistic catch routing
-                    workflow.logger.error(f"❌ CallState activity error: {e}")
+                    workflow.logger.error(f"CallState activity error: {e}")
                     handled = False
                     if current_state.catch:
                         for c in current_state.catch:
@@ -239,14 +242,14 @@ class SFSMInterpreter:
                 matched = False
                 for idx, rule in enumerate(current_state.rules):
                     eval_res = evaluate(rule.when, context)
-                    workflow.logger.info(f" Evaluating rule {idx}: when={rule.when} -> {eval_res}")
+                    workflow.logger.info(f"Evaluating rule {idx}: when={rule.when} -> {eval_res}")
                     if eval_res:
-                        workflow.logger.info(f"✅ Rule {idx} matched. Transitioning to '{rule.next}'")
+                        workflow.logger.info(f"Rule {idx} matched. Transitioning to '{rule.next}'")
                         frame.state_id = rule.next
                         matched = True
                         break
                 if not matched:
-                    workflow.logger.info(f"⚠️ No rules matched. Fallback to default '{current_state.default}'")
+                    workflow.logger.info(f"No rules matched. Fallback to default '{current_state.default}'")
                     frame.state_id = current_state.default
 
             elif isinstance(current_state, AssignState):
@@ -263,7 +266,7 @@ class SFSMInterpreter:
                                 set_path(frame.vars, k, dt.isoformat())
                     else:
                         set_path(frame.vars, k, resolve_dict(v, context))
-                    workflow.logger.info(f" Assigned '{k}' = {frame.vars.get(k)}")
+                    workflow.logger.info(f"Assigned '{k}' = {frame.vars.get(k)}")
                 frame.state_id = current_state.next
 
             elif isinstance(current_state, InvokeState):
@@ -281,7 +284,7 @@ class SFSMInterpreter:
                     new_frame.vars["input"] = resolved_inputs
 
                 workflow.logger.info(
-                    f" Invoking sub-process '{current_state.process}' "
+                    f"Invoking sub-process '{current_state.process}' "
                     f"with inputs: {resolved_inputs} | Frame variables initialized to: {new_frame.vars}"
                 )
                 self.state.frames.append(new_frame)
@@ -298,24 +301,30 @@ class SFSMInterpreter:
                     f"🏁 Reached EndState '{frame.state_id}' in process '{frame.process_id}' "
                     f"(status={current_state.status}, outcome={current_state.outcome}) | Final vars: {frame.vars}"
                 )
+
+                # evaluate return values while child frame vars are active in context
+                ret_val = None
+                if current_state.return_ is not None:
+                    ret_val = resolve_dict(current_state.return_, context)
+
+                # pop child frame after evaluation
                 self.state.frames.pop()
                 if self.state.frames:
                     parent_frame = self.state.frames[-1]
                     parent_state = self.definition.processes[parent_frame.process_id].states[parent_frame.state_id]
                     
                     if isinstance(parent_state, InvokeState):
-                        if current_state.outcome and parent_state.catch:
-                            caught = False
+                        caught = False
+                        if parent_state.catch:
                             for c in parent_state.catch:
-                                if c.on == current_state.outcome or c.on == "any":
-                                    parent_frame.state_id = c.next
+                                rule_on = c.on if hasattr(c, "on") else c.get("on")
+                                rule_next = c.next if hasattr(c, "next") else c.get("next")
+                                if rule_on == current_state.outcome or rule_on == "any":
+                                    parent_frame.state_id = rule_next
                                     caught = True
                                     break
-                            if not caught:
-                                parent_frame.state_id = parent_state.next
-                        else:
+                        if not caught:
                             if parent_state.assign:
-                                ret_val = resolve_dict(current_state.return_, context)
                                 set_path(parent_frame.vars, parent_state.assign, ret_val)
                                 workflow.logger.info(f"↩️ Returned {ret_val} into parent var '{parent_state.assign}'")
                             parent_frame.state_id = parent_state.next
@@ -323,7 +332,7 @@ class SFSMInterpreter:
                     return {
                         "status": current_state.status,
                         "outcome": current_state.outcome,
-                        "return": resolve_dict(current_state.return_, context)
+                        "return": ret_val
                     }
 
     @workflow.update

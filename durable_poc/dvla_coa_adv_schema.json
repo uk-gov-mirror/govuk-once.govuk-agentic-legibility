@@ -1,0 +1,852 @@
+{
+  "schema": "sfsm/0.2",
+  "id": "dvla.change_of_address",
+  "version": "0.2.1",
+  "entry": "main",
+
+  "executor": {
+    "workflow_id_template": "coa-adv-{{input.licence_no}}",
+    "run_timeout": "P14D"
+  },
+
+  "processes": {
+
+    "main": {
+      "start": "confirm_intent",
+      "vars": { 
+        "address": null, 
+        "photo_id": null, 
+        "signature_id": null,
+        "driver_id": null,
+        "job_id": null,
+        "organ_consent": null
+      },
+      "states": {
+        "confirm_intent": {
+          "type": "input",
+          "prompt": "Would you like to proceed with changing the address on your driving licence?",
+          "schema": { "kind": "boolean" },
+          "assign": "confirmed",
+          "next": "branch_intent"
+        },
+        "branch_intent": {
+          "type": "choice",
+          "rules": [
+            { "when": { "op": "is_true", "path": "confirmed" }, "next": "check_name_change" }
+          ],
+          "default": "say_cancelled"
+        },
+        "say_cancelled": {
+          "type": "output",
+          "channel": "transcript",
+          "message": "Service cancelled. No changes have been made to your driver record.",
+          "next": "end_cancelled"
+        },
+
+        "check_name_change": {
+          "type": "input",
+          "prompt": "Do you also need to change your legal name on your licence?",
+          "schema": { "kind": "boolean" },
+          "assign": "name_change_needed",
+          "next": "branch_name_change"
+        },
+        "branch_name_change": {
+          "type": "choice",
+          "rules": [
+            { "when": { "op": "is_true", "path": "name_change_needed" }, "next": "say_postal_only" }
+          ],
+          "default": "run_driver_details"
+        },
+        "say_postal_only": {
+          "type": "output",
+          "channel": "transcript",
+          "message": "Name changes cannot be processed online. You must apply by post using a D1 application form with original identity documents.",
+          "next": "end_postal_required"
+        },
+
+        "run_driver_details": {
+          "type": "invoke",
+          "process": "driver_details",
+          "assign": "driver_id",
+          "catch": [ { "on": "api_failure", "next": "end_exception" } ],
+          "next": "run_photo_update"
+        },
+
+        "run_photo_update": {
+          "type": "invoke",
+          "process": "photo_update",
+          "input": { "driver_id": { "$": "driver_id" } },
+          "assign": "photo_id",
+          "catch": [ 
+            { "on": "invalid_photo", "next": "end_rejected" },
+            { "on": "api_failure", "next": "end_exception" }
+          ],
+          "next": "run_signature_update"
+        },
+
+        "run_signature_update": {
+          "type": "invoke",
+          "process": "signature_update",
+          "input": { "driver_id": { "$": "driver_id" } },
+          "assign": "signature_id",
+          "catch": [ 
+            { "on": "invalid_signature", "next": "end_rejected" },
+            { "on": "api_failure", "next": "end_exception" }
+          ],
+          "next": "run_organ_donation"
+        },
+
+        "run_organ_donation": {
+          "type": "invoke",
+          "process": "organ_donation",
+          "input": { "driver_id": { "$": "driver_id" } },
+          "assign": "organ_consent",
+          "next": "run_select_address"
+        },
+
+        "run_select_address": {
+          "type": "invoke",
+          "process": "select_address",
+          "assign": "address",
+          "catch": [ { "on": "api_failure", "next": "end_exception" } ],
+          "next": "run_address_update"
+        },
+
+        "run_address_update": {
+          "type": "invoke",
+          "process": "address_update",
+          "input": { "address": { "$": "address" }, "photo_id": { "$": "photo_id" } },
+          "assign": "job_id",
+          "catch": [ { "on": "rejected", "next": "end_rejected" } ],
+          "next": "send_confirmation_email"
+        },
+
+        "send_confirmation_email": {
+          "type": "output",
+          "channel": "email",
+          "template": "coa_application_submitted",
+          "params": { "postcode": { "$": "address.postcode" } },
+          "idempotency_key": "{{workflow_id}}:confirmation_email",
+          "next": "run_finalisation"
+        },
+
+        "run_finalisation": {
+          "type": "invoke",
+          "process": "finalisation",
+          "input": { "address": { "$": "address" }, "job_id": { "$": "job_id"}},
+          "catch": [ { "on": "delivery_exception", "next": "end_exception" } ],
+          "next": "end_complete"
+        },
+
+        "end_complete":        { "type": "end", "status": "success",         "outcome": "licence_renewed_and_updated" },
+        "end_cancelled":       { "type": "end", "status": "cancelled",       "outcome": "user_cancelled" },
+        "end_postal_required": { "type": "end", "status": "cancelled",       "outcome": "postal_application_required" },
+        "end_ineligible":      { "type": "end", "status": "failed",          "outcome": "user_ineligible" },
+        "end_rejected":        { "type": "end", "status": "failed",          "outcome": "update_rejected" },
+        "end_exception":       { "type": "end", "status": "needs_attention", "outcome": "system_exception" }
+      }
+    },
+
+    "driver_details": {
+      "start": "get_driver_details",
+      "vars": {
+          "driver": null,
+          "driver_id": null,
+          "first_name": null,
+          "last_name": null,
+          "date_of_birth": null,
+          "line1": null,
+          "postcode": null,
+          "details_confirmed": null,
+          "manual_first_name": null,
+          "manual_last_name": null,
+          "manual_dob": null,
+          "manual_licence_no": null,
+          "manual_address": null,
+          "manual_summary_confirmed": null
+        },
+      "states": {
+        "get_driver_details": {
+          "type": "call",
+          "method": "GET",
+          "service": "dvla",
+          "url": "/app/dvla/v1/driver-summary",
+          "idempotency_key": "{{workflow_id}}:get_driver_summary",
+          "assign": "driver",
+          "capture": {
+            "driver_id": "body.driverViewResponse.driver.drivingLicenceNumber",
+            "first_name": "body.driverViewResponse.driver.firstNames",
+            "last_name": "body.driverViewResponse.driver.lastName",
+            "date_of_birth": "body.driverViewResponse.driver.dateOfBirth",
+            "line1": "body.driverViewResponse.driver.address.unstructuredAddress.line1",
+            "postcode": "body.driverViewResponse.driver.address.unstructuredAddress.postcode"
+          },
+          "catch": [ { "on": "any", "next": "end_api_failure" } ],
+          "next": "confirm_driver_details"
+        },
+        "confirm_driver_details": {
+          "type": "input",
+          "prompt": "Are these driver details correct?\nName: {{driver.first_name}} {{driver.last_name}}\nLicence Number: {{driver.driver_id}}\nDOB: {{driver.date_of_birth}}",
+          "schema": { "kind": "boolean" },
+          "assign": "details_confirmed",
+          "next": "branch_driver_details"
+        },
+        "branch_driver_details": {
+          "type": "choice",
+          "rules": [
+            { "when": { "op": "is_true", "path": "details_confirmed" }, "next": "end_success" }
+          ],
+          "default": "prompt_manual_first_name"
+        },
+        "prompt_manual_first_name": {
+          "type": "input",
+          "prompt": "Please enter your correct First Name:",
+          "schema": { "kind": "string" },
+          "assign": "manual_first_name",
+          "next": "prompt_manual_last_name"
+        },
+        "prompt_manual_last_name": {
+          "type": "input",
+          "prompt": "Please enter your correct Last Name:",
+          "schema": { "kind": "string" },
+          "assign": "manual_last_name",
+          "next": "prompt_manual_dob"
+        },
+        "prompt_manual_dob": {
+          "type": "input",
+          "prompt": "Please enter your Date of Birth (DD/MM/YYYY):",
+          "schema": { "kind": "string", "pattern": "^[0-9]{2}/[0-9]{2}/[0-9]{4}$" },
+          "assign": "manual_dob",
+          "next": "prompt_manual_licence_no"
+        },
+        "prompt_manual_licence_no": {
+          "type": "input",
+          "prompt": "Please enter your Driving Licence Number:",
+          "schema": { "kind": "string" },
+          "assign": "manual_licence_no",
+          "next": "confirm_manual_summary"
+        },
+        "confirm_manual_summary": {
+          "type": "input",
+          "prompt": "Please confirm your updated details are correct:\nName: {{manual_first_name}} {{manual_last_name}}\nDOB: {{manual_dob}}\nLicence Number: {{manual_licence_no}}",
+          "schema": { "kind": "boolean" },
+          "assign": "manual_summary_confirmed",
+          "next": "branch_manual_summary"
+        },
+        "branch_manual_summary": {
+          "type": "choice",
+          "rules": [
+            { "when": { "op": "is_true", "path": "manual_summary_confirmed" }, "next": "end_manual_updated" }
+          ],
+          "default": "prompt_manual_first_name"
+        },
+        "end_success": {
+          "type": "end",
+          "status": "success",
+          "outcome": "details_confirmed",
+          "return": { "$": "driver.driver_id" }
+        },
+        "end_manual_updated": {
+          "type": "end",
+          "status": "success",
+          "outcome": "details_manually_updated",
+          "return": { "$": "manual_licence_no" }
+        },
+        "end_api_failure": {
+          "type": "end",
+          "status": "failed",
+          "outcome": "api_failure"
+        }
+      }
+    },
+
+    "photo_update": {
+      "start": "check_photocard",
+      "vars": {
+        "photocard_res": null,
+        "expired": null,
+        "photo_id": null,
+        "user_wants_upload": false,
+        "uploaded_photo": null,
+        "photo_validation": null,
+        "uploaded_photo_id": null,
+        "is_icao_compliant": null,
+        "upload_attempts": 0
+      },
+      "states": {
+        "check_photocard": {
+          "type": "call",
+          "method": "GET",
+          "service": "dvla",
+          "url": "/app/dvla/v1/photo_expiry/{{input.driver_id}}",
+          "idempotency_key": "{{workflow_id}}:check_photocard",
+          "assign": "photocard_res",
+          "capture": {
+            "expired": "body.expired",
+            "photo_id": "body.photo_id"
+          },
+          "catch": [ { "on": "any", "next": "prompt_mandatory_upload" } ],
+          "next": "branch_photocard_expired"
+        },
+
+        "branch_photocard_expired": {
+          "type": "choice",
+          "rules": [
+            { "when": { "op": "is_true", "path": "photocard_res.expired" }, "next": "prompt_mandatory_upload" }
+          ],
+          "default": "prompt_optional_upload"
+        },
+
+        "prompt_optional_upload": {
+          "type": "input",
+          "prompt": "Your photocard photo is up to date. Would you still like to upload a new photo?",
+          "schema": { "kind": "boolean" },
+          "assign": "user_wants_upload",
+          "next": "branch_optional_upload"
+        },
+        "branch_optional_upload": {
+          "type": "choice",
+          "rules": [
+            { "when": { "op": "is_true", "path": "user_wants_upload" }, "next": "prompt_photo_upload" }
+          ],
+          "default": "say_photo_up_to_date"
+        },
+        "say_photo_up_to_date": {
+          "type": "output",
+          "channel": "transcript",
+          "message": "Your current photocard photo will be kept.",
+          "next": "end_photo_reused"
+        },
+
+        "prompt_mandatory_upload": {
+          "type": "output",
+          "channel": "transcript",
+          "message": "Your photocard photo has expired and must be updated.",
+          "next": "prompt_photo_upload"
+        },
+        "prompt_photo_upload": {
+          "type": "input",
+          "prompt": "Please upload a new passport-style photo file:",
+          "schema": { "kind": "file_ref" },
+          "assign": "uploaded_photo",
+          "next": "validate_photo_api"
+        },
+
+        "validate_photo_api": {
+          "type": "call",
+          "method": "POST",
+          "service": "dvla",
+          "url": "/app/dvla/v1/photo_validity",
+          "body": { "driver_id": { "$": "input.driver_id" }, "photo_data": { "$": "uploaded_photo" } },
+          "idempotency_key": "{{workflow_id}}:upload_photo_{{upload_attempts}}",
+          "assign": "photo_validation",
+          "capture": {
+            "uploaded_photo_id": "body.photo_id",
+            "is_icao_compliant": "body.photo.icaoCompliant"
+          },
+          "catch": [ { "on": "any", "next": "increment_attempt_counter" } ],
+          "next": "branch_photo_validation"
+        },
+
+        "branch_photo_validation": {
+          "type": "choice",
+          "rules": [
+            { "when": { "op": "is_true", "path": "photo_validation.is_icao_compliant" }, "next": "say_photo_accepted" }
+          ],
+          "default": "increment_attempt_counter"
+        },
+
+        "say_photo_accepted": {
+          "type": "output",
+          "channel": "transcript",
+          "message": "Your uploaded photo has been validated and accepted.",
+          "next": "end_uploaded_photo"
+        },
+
+        "increment_attempt_counter": {
+          "type": "assign",
+          "set": {
+            "upload_attempts": { "op": "add", "path": "upload_attempts", "value": 1 }
+          },
+          "next": "check_retry_limit"
+        },
+        "check_retry_limit": {
+          "type": "choice",
+          "rules": [
+            { "when": { "op": "gte", "path": "upload_attempts", "value": 3 }, "next": "say_max_attempts_exceeded" }
+          ],
+          "default": "say_invalid_photo_retry"
+        },
+        "say_invalid_photo_retry": {
+          "type": "output",
+          "channel": "transcript",
+          "message": "The uploaded photo was invalid. Please try uploading again (Attempt {{upload_attempts}} of 3).",
+          "next": "prompt_photo_upload"
+        },
+        "say_max_attempts_exceeded": {
+          "type": "output",
+          "channel": "transcript",
+          "message": "Maximum photo upload attempts exceeded. Please try again later.",
+          "next": "end_invalid_photo"
+        },
+
+        "end_photo_reused":  { "type": "end", "status": "success", "outcome": "photo_reused", "return": { "$": "photocard_res.photo_id" } },
+        "end_uploaded_photo": { "type": "end", "status": "success", "outcome": "photo_updated", "return": { "$": "photo_validation.uploaded_photo_id" } },
+        "end_invalid_photo":  { "type": "end", "status": "failed",  "outcome": "invalid_photo" },
+        "end_api_failure":    { "type": "end", "status": "failed",  "outcome": "api_failure" }
+      }
+    },
+
+    "signature_update": {
+      "start": "prompt_new_signature",
+      "vars": {
+        "upload_attempts": 0
+      },
+      "states": {
+        "prompt_new_signature": {
+          "type": "input",
+          "prompt": "Please add a new signiture:",
+          "schema": { "kind": "string" },
+          "assign": "new_signature",
+          "next": "add_signature_api"
+        },
+
+        "add_signature_api": {
+          "type": "call",
+          "method": "POST",
+          "service": "dvla",
+          "url": "/app/dvla/v1/signature",
+          "body": { "driver_id": { "$": "input.driver_id" }, "digital_signature": { "$": "new_signature" } },
+          "idempotency_key": "{{workflow_id}}:add_signature_api_{{upload_attempts}}",
+          "assign": "signature_accepted",
+          "capture": {
+            "status": "status",
+            "signature_id": "body.signature_id",
+            "detail": "body.detail"
+          },
+          "catch": [ { "on": "any", "next": "increment_attempt_counter" } ],
+          "next": "branch_sig_validation"
+        },
+
+        "branch_sig_validation": {
+          "type": "choice",
+          "rules": [
+            { "when": { "op": "eq", "path": "signature_accepted.status", "value": 202 }, "next": "say_sig_accepted" }
+          ],
+          "default": "increment_attempt_counter"
+        },
+
+        "say_sig_accepted": {
+          "type": "output",
+          "channel": "transcript",
+          "message": "Your signature has been accepted.",
+          "next": "end_new_sig"
+        },
+
+        "increment_attempt_counter": {
+          "type": "assign",
+          "set": {
+            "upload_attempts": { "op": "add", "path": "upload_attempts", "value": 1 }
+          },
+          "next": "check_retry_limit"
+        },
+        "check_retry_limit": {
+          "type": "choice",
+          "rules": [
+            { "when": { "op": "gte", "path": "upload_attempts", "value": 3 }, "next": "say_max_attempts_exceeded" }
+          ],
+          "default": "say_invalid_sig_retry"
+        },
+        "say_invalid_sig_retry": {
+          "type": "output",
+          "channel": "transcript",
+          "message": "The signature was not accepted. Please try again (Attempt {{upload_attempts}} of 3).",
+          "next": "prompt_new_signature"
+        },
+        "say_max_attempts_exceeded": {
+          "type": "output",
+          "channel": "transcript",
+          "message": "Maximum attempts exceeded. Please try again later.",
+          "next": "end_invalid_sig"
+        },
+
+        "end_new_sig": { "type": "end", "status": "success", "outcome": "signature_added" },
+        "end_invalid_sig":  { "type": "end", "status": "failed",  "outcome": "invalid_signature" },
+        "end_api_failure":    { "type": "end", "status": "failed",  "outcome": "api_failure" }
+      }
+    },
+
+    "select_address": {
+      "start": "choose_entry_method",
+      "vars": {
+        "entry_method": null,
+        "postcode": null,
+        "postcode_attempts": 0,
+        "addresses": null,
+        "selected_address": null,
+        "manual_address": null,
+        "manual_postcode": null
+      },
+      "states": {
+        "choose_entry_method": {
+          "type": "input",
+          "prompt": "How would you like to enter your new address?\n1 - Search by Postcode\n2 - Enter Address Manually",
+          "schema": {
+            "kind": "string"
+          },
+          "assign": "entry_method",
+          "next": "branch_method"
+        },
+        "branch_method": {
+          "type": "choice",
+          "rules": [
+            { "when": { "op": "eq", "path": "entry_method", "value": "2" }, "next": "prompt_manual_address" },
+            { "when": { "op": "eq", "path": "entry_method", "value": 2 }, "next": "prompt_manual_address" },
+            { "when": { "op": "contains", "path": "entry_method", "value": "2" }, "next": "prompt_manual_address" },
+            { "when": { "op": "contains", "path": "entry_method", "value": "manual" }, "next": "prompt_manual_address" }
+          ],
+        "default": "prompt_postcode"
+      },
+        "prompt_postcode": {
+          "type": "input",
+          "prompt": "Enter your new UK postcode:",
+          "schema": {
+            "kind": "string",
+            "pattern": "[A-Z]{1,2}\\d[A-Z\\d]?\\s*\\d[A-Z]{2}",
+            "normalise": "upper_trim",
+            "invalid_message": "That doesn't look like a UK postcode."
+          },
+          "assign": "postcode",
+          "on_invalid": "increment_postcode_attempts",
+          "next": "lookup_postcode"
+        },
+        "increment_postcode_attempts": {
+          "type": "assign",
+          "set": {
+            "postcode_attempts": { "op": "add", "path": "postcode_attempts", "value": 1 }
+          },
+          "next": "check_postcode_retry_limit"
+        },
+        "check_postcode_retry_limit": {
+          "type": "choice",
+          "rules": [
+            { "when": { "op": "gte", "path": "postcode_attempts", "value": 3 }, "next": "say_max_postcode_attempts" }
+          ],
+          "default": "prompt_postcode"
+        },
+        "say_max_postcode_attempts": {
+          "type": "output",
+          "channel": "transcript",
+          "message": "Maximum postcode entry attempts exceeded. Please enter your address manually.",
+          "next": "prompt_manual_address"
+        },
+        "lookup_postcode": {
+          "type": "call",
+          "method": "POST",
+          "service": "postoffice",
+          "url": "/app/postoffice/v1/address_from_postcode",
+          "body": { "postcode": { "$": "postcode" } },
+          "idempotency_key": "{{workflow_id}}:address_lookup_{{postcode}}",
+          "assign": "addresses",
+          "capture": {
+            "addresses": "body.addresses"
+          },
+          "catch": [ { "on": "any", "next": "end_api_failure" } ],
+          "next": "prompt_select_address"
+        },
+        "prompt_select_address": {
+          "type": "input",
+          "prompt": "Select your address by entering the uprn code:",
+          "schema": {
+            "kind": "select_one",
+            "options_from": "addresses.addresses",
+            "value_key": "uprn",
+            "label_key": "single_line"
+          },
+          "assign": "selected_address",
+          "next": "end_success_selected"
+        },
+        "prompt_manual_address": {
+          "type": "input",
+          "prompt": "Enter Address Line 1 (e.g., 10 Downing Street):",
+          "schema": { "kind": "string" },
+          "assign": "manual_address",
+          "next": "prompt_manual_postcode"
+        },
+        "prompt_manual_postcode": {
+          "type": "input",
+          "prompt": "Enter your UK postcode:",
+          "schema": {
+            "kind": "string",
+            "pattern": "[A-Z]{1,2}\\d[A-Z\\d]?\\s*\\d[A-Z]{2}",
+            "normalise": "upper_trim",
+            "invalid_message": "That doesn't look like a valid UK postcode."
+          },
+          "assign": "manual_postcode",
+          "next": "end_success_manual"
+        },
+        "end_success_selected": { 
+          "type": "end", 
+          "status": "success", 
+          "outcome": "address_selected", 
+          "return": { "single_line": { "$": "selected_address.line1" }, "postcode": { "$": "postcode" } } 
+        },
+        "end_success_manual": { 
+          "type": "end", 
+          "status": "success", 
+          "outcome": "address_entered_manually", 
+          "return": { "single_line": { "$": "manual_address" }, "postcode": { "$": "manual_postcode" } } 
+        },
+        "end_api_failure": { 
+          "type": "end", 
+          "status": "failed", 
+          "outcome": "api_failure" 
+        }
+      }
+    },
+
+    "address_update": {
+      "start": "submit",
+      "vars": { 
+        "submission": null
+      },
+      "states": {
+        "submit": {
+          "type": "call",
+          "method": "POST",
+          "service": "dvla",
+          "url": "/app/dvla/v1/licence/address",
+          "body": { "address": { "$": "input.address" }, "photo_id": { "$": "input.photo_id" } },
+          "idempotency_key": "{{workflow_id}}:address_update",
+          "assign": "submission",
+          "capture": {
+            "status": "status",
+            "job_id": "body.job_id"
+          },
+          "catch": [ { "on": "any", "next": "end_rejected" } ],
+          "next": "branch_accepted"
+        },
+        "branch_accepted": {
+          "type": "choice",
+          "rules": [
+            { "when": { "op": "eq", "path": "submission.status", "value": 202 }, "next": "say_update_accepted" }
+          ],
+          "default": "say_update_rejected"
+        },
+        "say_update_accepted": {
+          "type": "output",
+          "channel": "transcript",
+          "message": "Your driving licence address update has been submitted. Please wait while your application is processed (this background check typically takes up to 8 hours to complete).",
+          "next": "end_ok"
+        },
+        "say_update_completed": {
+          "type": "output",
+          "channel": "transcript",
+          "message": "Licence has successfully been submitted.",
+          "next": "end_ok"
+        },
+        "say_update_rejected": {
+          "type": "output",
+          "channel": "transcript",
+          "message": "Your address update could not be submitted. Please contact DVLA customer support.",
+          "next": "end_rejected"
+        },
+        "end_ok":       { "type": "end", "status": "success", "outcome": "updated", "return": { "$": "submission.job_id" } },
+        "end_rejected": { "type": "end", "status": "failed",  "outcome": "rejected" }
+      }
+    },
+
+    "organ_donation": {
+      "start": "get_organ_status",
+      "vars": {
+        "organ_data": null,
+        "update_organ": false,
+        "decision": null,
+        "nhs_res": null
+      },
+      "states": {
+      "get_organ_status": {
+          "type": "call",
+          "method": "GET",
+          "service": "dvla",
+          "url": "/app/dvla/v1/organs/{{input.driver_id}}",
+          "idempotency_key": "{{workflow_id}}:get_organ_status",
+          "assign": "organ_data",
+          "capture": {
+            "anyOrgans": "body.organDonor.anyOrgans",
+            "kidneys": "body.organDonor.kidneys",
+            "liver": "body.organDonor.liver",
+            "heart": "body.organDonor.heart",
+            "pancreas": "body.organDonor.pancreas",
+            "cornea": "body.organDonor.cornea",
+            "lungs": "body.organDonor.lungs"
+          },
+          "catch": [ { "on": "any", "next": "prompt_organ_status_fallback" } ],
+          "next": "prompt_organ_status"
+        },
+
+        "prompt_organ_status": {
+          "type": "input",
+          "prompt": "Your current NHS Organ Donor preferences on file:\n• All Organs: {{organ_data.anyOrgans}}\n• Kidneys: {{organ_data.kidneys}}\n• Liver: {{organ_data.liver}}\n• Heart: {{organ_data.heart}}\n• Pancreas: {{organ_data.pancreas}}\n• Cornea: {{organ_data.cornea}}\n• Lungs: {{organ_data.lungs}}\n\nWould you like to update your preferences on the NHS Organ Donor Register?",
+          "schema": { "kind": "boolean" },
+          "assign": "update_organ",
+          "next": "branch_organ"
+        },
+
+        "prompt_organ_status_fallback": {
+          "type": "input",
+          "prompt": "Would you like to register or update your preferences on the NHS Organ Donor Register?",
+          "schema": { "kind": "boolean" },
+          "assign": "update_organ",
+          "next": "branch_organ"
+        },
+
+        "branch_organ": {
+          "type": "choice",
+          "rules": [
+            { "when": { "op": "is_true", "path": "update_organ" }, "next": "prompt_decision" }
+          ],
+          "default": "say_no_change"
+        },
+
+        "prompt_decision": {
+          "type": "input",
+          "prompt": "Select your new NHS Organ Donation decision:\n1 - Donate all organs and tissue\n2 - Donate some organs and tissue\n3 - Do not donate",
+          "schema": {
+            "kind": "select_one",
+            "value_key": "id",
+            "label_key": "label"
+          },
+          "options": [
+            { "id": "donate_all", "label": "Donate all organs and tissue" },
+            { "id": "donate_some", "label": "Donate some organs and tissue" },
+            { "id": "refuse", "label": "Do not donate" }
+          ],
+          "assign": "decision",
+          "next": "say_preference_submitted"
+        },
+
+        "say_preference_submitted": {
+          "type": "output",
+          "channel": "transcript",
+          "message": "Your organ donation preference has been submitted to the NHS Organ Donor Register.",
+          "next": "end_updated"
+        },
+
+        "say_no_change": {
+          "type": "output",
+          "channel": "transcript",
+          "message": "No changes have been made to your Organ Donation preferences.",
+          "next": "end_no_change"
+        },
+
+        "end_updated": { 
+          "type": "end", 
+          "status": "success", 
+          "outcome": "organ_preference_updated", 
+          "return": { "$": "decision.id" } 
+        },
+        "end_no_change": { 
+          "type": "end", 
+          "status": "success", 
+          "outcome": "organ_preference_unchanged", 
+          "return": null 
+        }
+      }
+    },
+
+    "finalisation": {
+      "start": "set_deadline",
+      "vars": { 
+        "job_id": null, 
+        "poll_interval": "PT5M", 
+        "poll_window": "PT8H",
+        "reminder_after": "P4D",
+        "deadline": null, 
+        "job": null,
+        "received": null
+      },
+      "states": {
+        "set_deadline": {
+          "type": "assign",
+          "set": { "deadline": { "op": "now_plus", "value_path": "poll_window" } },
+          "next": "wait"
+        },
+        "wait": { "type": "wait", "duration": { "$": "poll_interval" }, "next": "poll" },
+        "poll": {
+          "type": "call",
+          "method": "GET",
+          "service": "dvla",
+          "url": "/app/dvla/v1/jobs/{{input.job_id}}",
+          "idempotency_key": "{{workflow_id}}:poll_job_{{step}}",
+          "assign": "job",
+          "capture": {
+            "state": "body.state"
+          },
+          "catch": [ { "on": "any", "next": "branch_deadline" } ],
+          "next": "branch_job"
+        },
+        "branch_job": {
+          "type": "choice",
+          "rules": [
+            { "when": { "op": "eq", "path": "job.state", "value": "COMPLETED" }, "next": "await_receipt" },
+            { "when": { "op": "eq", "path": "job.state", "value": "REJECTED" },  "next": "say_job_rejected" }
+          ],
+          "default": "branch_deadline"
+        },
+        "branch_deadline": {
+          "type": "choice",
+          "rules": [ { "when": { "op": "before_now", "path": "deadline" }, "next": "say_timeout" } ],
+          "default": "wait"
+        },
+        "await_receipt": {
+          "type": "input",
+          "prompt": "Your new licence has been delivered to {{input.address.single_line}}, {{input.address.postcode}}.\nHave you received your new photocard driving licence in the post?",
+          "schema": { "kind": "boolean" },
+          "assign": "received",
+          "timeout": { "after": { "$": "reminder_after" }, "next": "say_no_response" },
+          "next": "branch_receipt"
+        },
+        "branch_receipt": {
+          "type": "choice",
+          "rules": [ { "when": { "op": "is_true", "path": "received" }, "next": "suggest_v5c_update" } ],
+          "default": "say_not_received"
+        },
+        "suggest_v5c_update": {
+          "type": "output",
+          "channel": "transcript",
+          "message": "Thank you for confirming! If you own a vehicle, please remember to update the address on your V5C logbook online via GOV.UK.",
+          "next": "end_ok"
+        },
+        "say_timeout": {
+          "type": "output",
+          "channel": "transcript",
+          "message": "Your update is taking longer than expected. We've logged this case for manual review.",
+          "next": "end_rejected"
+        },
+        "say_not_received": {
+          "type": "output",
+          "channel": "transcript",
+          "message": "Sorry to hear that. We've opened a tracking case with Royal Mail.",
+          "next": "end_exception"
+        },
+        "say_no_response": {
+          "type": "output",
+          "channel": "transcript",
+          "message": "We haven't heard from you about your new licence. We've logged this case for follow-up.",
+          "next": "end_exception"
+        },
+        "say_job_rejected": {
+          "type": "output",
+          "channel": "transcript",
+          "message": "Your address update was rejected. Please contact DVLA customer support.",
+          "next": "end_rejected"
+        },
+        "end_ok":        { "type": "end", "status": "success", "outcome": "delivery_confirmed" },
+        "end_exception": { "type": "end", "status": "failed",  "outcome": "delivery_exception" },
+        "end_rejected":  { "type": "end", "status": "failed",  "outcome": "delivery_rejected" }
+      }
+    }
+
+  }
+}
